@@ -589,6 +589,9 @@ func (v *MultiIssuerTokenValidator) validateExternalToken(
 	if err := checkMayActAllowed(extraClaims, v.selfIssuer, issuerConfig); err != nil {
 		return nil, err
 	}
+	if rawMayAct, ok := extraClaims["may_act"]; ok && rawMayAct != nil && !issuerConfig.AllowMayAct {
+		return nil, fmt.Errorf("subject token from issuer %q carries a may_act claim, but allow_may_act is disabled", issuerConfig.IssuerURL)
+	}
 
 	claims := buildValidatedClaims(standardClaims, extraClaims)
 

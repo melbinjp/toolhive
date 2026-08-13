@@ -589,6 +589,9 @@ func (v *MultiIssuerTokenValidator) validateExternalToken(
 	if err := checkMayActAllowed(extraClaims, v.selfIssuer, issuerConfig); err != nil {
 		return nil, err
 	}
+	if rawMayAct, ok := extraClaims["may_act"]; ok && rawMayAct != nil && !issuerConfig.AllowMayAct {
+		return nil, fmt.Errorf("subject token from issuer %q carries a may_act claim, but allow_may_act is disabled", issuerConfig.IssuerURL)
+	}
 
 	claims := buildValidatedClaims(standardClaims, extraClaims)
 
@@ -1014,6 +1017,11 @@ func validateTrustedIssuer(ti TrustedIssuer, selfIssuer string, issuers map[stri
 	}
 	if err := validateAllowedDelegateClients(ti); err != nil {
 		return err
+	}
+	if ti.AllowMayAct && slices.Contains(ti.AllowedDelegateClients, anyDelegateClient) {
+		return fmt.Errorf(
+			"issuer_url %q: allow_may_act must not be enabled when allowed_delegate_clients contains the wildcard %q",
+			ti.IssuerURL, anyDelegateClient)
 	}
 	// AllowPrivateIPs without a hand-configured jwks_url would let OIDC
 	// discovery — a document fetched from, and thus influenceable by, the

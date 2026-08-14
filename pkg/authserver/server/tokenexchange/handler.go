@@ -547,15 +547,6 @@ func buildActClaim(validatedClaims *ValidatedClaims, issuer, actorID string) (ma
 		return nil, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint(
 			"The subject token's delegation chain is too large."))
 	}
-	encodedAct, err := json.Marshal(act)
-	if err != nil {
-		return nil, errorsx.WithStack(fosite.ErrInvalidGrant.WithHint(
-			"The subject token's delegation chain cannot be serialized."))
-	}
-	if len(encodedAct) > maxActClaimSize {
-		return nil, errorsx.WithStack(fosite.ErrInvalidGrant.WithHint(
-			"The subject token's delegation chain is too large."))
-	}
 	return act, nil
 }
 

@@ -129,7 +129,6 @@ func TestCompileActorMatcher_NonBoolResultDeniesAtEvaluation(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, matched)
 }
-
 func TestMultiIssuerTokenValidator_Validate(t *testing.T) {
 	t.Parallel()
 

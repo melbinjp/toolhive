@@ -458,7 +458,7 @@ delegate_clients:
    entry additionally carries `sub` (the allowlisted actor claim) when the
    allowlist path resolved one; a `may_act`-bearing external token yields
    `act = {iss: <toolhive-issuer>, sub: <toolhive-client>, act: {iss:
-   <external-issuer>}}` — no client-namespace actor to report there, but the
+<external-issuer>}}` — no client-namespace actor to report there, but the
    issuer is still recorded. Either way, Cedar authorizers key on `sub` and do
    not read `act` — it is an audit trail, not an access control. (AWS STS role
    mapping can read arbitrary claims including `act` via its CEL matcher, so

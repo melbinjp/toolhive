@@ -25,6 +25,7 @@ import (
 	"errors"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ory/fosite"
@@ -534,6 +535,31 @@ type PendingAuthorizationStorage interface {
 // assertion-grant composition needs replay-consumption access.
 type AssertionJWTConsumer interface {
 	ConsumeAssertionJWT(ctx context.Context, purpose, issuer, jti string, exp time.Time) error
+}
+
+// SyntheticClientIDPrefix marks a client ID minted by NewSyntheticClient. A
+// grant that skips client authentication (fosite's CanSkipClientAuth) has no
+// real registered fosite.Client to attach to its request, but every storage
+// backend's marshal/unmarshal path calls request.GetClient() unconditionally
+// — so the request still needs a non-nil one. A synthetic client ID encodes
+// everything needed to reconstruct that client, so unmarshaling never has to
+// look it up in the client registry (it was never registered there).
+const SyntheticClientIDPrefix = "synthetic:"
+
+// NewSyntheticClient returns a public fosite.Client identified only by id,
+// for a clientless grant to attach to its fosite.AccessRequester so no
+// storage backend ever has to marshal a nil client. id should carry the
+// SyntheticClientIDPrefix so IsSyntheticClientID recognizes it again on
+// unmarshal.
+func NewSyntheticClient(id string) fosite.Client {
+	return &fosite.DefaultClient{ID: id, Public: true}
+}
+
+// IsSyntheticClientID reports whether id was minted by NewSyntheticClient,
+// letting a storage backend reconstruct the client locally on unmarshal
+// instead of looking it up in the client registry.
+func IsSyntheticClientID(id string) bool {
+	return strings.HasPrefix(id, SyntheticClientIDPrefix)
 }
 
 // ClientRegistry provides client registration and lookup operations.

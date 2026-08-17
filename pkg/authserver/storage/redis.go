@@ -1991,8 +1991,17 @@ func marshalRequester(request fosite.Requester) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal session: %w", err)
 	}
 
+	// A clientless grant (fosite's CanSkipClientAuth) is expected to attach a
+	// synthetic client (see NewSyntheticClient) rather than leave this nil;
+	// this fallback only guards against a future clientless grant that
+	// forgets to.
+	var clientID string
+	if client := request.GetClient(); client != nil {
+		clientID = client.GetID()
+	}
+
 	stored := storedSession{
-		ClientID:          request.GetClient().GetID(),
+		ClientID:          clientID,
 		RequestedAt:       request.GetRequestedAt(),
 		RequestedScopes:   request.GetRequestedScopes(),
 		GrantedScopes:     request.GetGrantedScopes(),
@@ -2015,10 +2024,18 @@ func unmarshalRequester(ctx context.Context, data []byte, s *RedisStorage) (fosi
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
-	// Look up the client
-	client, err := s.GetClient(ctx, stored.ClientID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get client for session: %w", err)
+	// A synthetic client (see NewSyntheticClient) was never registered via
+	// RegisterClient, so its ID alone reconstructs it rather than looking it
+	// up through the client registry.
+	var client fosite.Client
+	if IsSyntheticClientID(stored.ClientID) {
+		client = NewSyntheticClient(stored.ClientID)
+	} else {
+		fetchedClient, err := s.GetClient(ctx, stored.ClientID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get client for session: %w", err)
+		}
+		client = fetchedClient
 	}
 
 	// Create a session prototype via factory, then deserialize the full session

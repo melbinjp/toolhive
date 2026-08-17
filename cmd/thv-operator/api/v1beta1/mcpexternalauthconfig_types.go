@@ -399,11 +399,20 @@ type DelegateClientConfig struct {
 // preserving existing manifest validation while allowing a grant-only issuer.
 //
 // +kubebuilder:validation:XValidation:rule="!('*' in self.allowedDelegateClients) || size(self.allowedDelegateClients) == 1",message="allowedDelegateClients must not combine the wildcard \"*\" with specific client IDs"
+//
+// The allowedDelegateClients rule below mirrors validateDelegationPolicy
+// (pkg/authserver/server/tokenexchange/multi_issuer_validator.go): it is
+// keyed on whether ANY delegation field is set (expectedAudience,
+// actorClaim, actorMatcher, allowMayAct), not merely on whether
+// jwtBearerGrant is absent — an issuer can combine jwtBearerGrant with
+// expectedAudience for RFC 8693 delegation on the same issuer, and that
+// combination still requires allowedDelegateClients at the Go level.
+//
 // +kubebuilder:validation:XValidation:rule="!(has(self.allowMayAct) && self.allowMayAct && '*' in self.allowedDelegateClients)",message="allowMayAct must not be enabled when allowedDelegateClients contains the wildcard \"*\""
 // +kubebuilder:validation:XValidation:rule="!has(self.actorClaim) || !(self.actorClaim in ['sub', 'iss', 'aud', 'exp', 'iat', 'nbf', 'jti', 'name', 'email', 'scope', 'scp', 'may_act'])",message="actorClaim must name a readable claim; use client_id or a non-reserved claim such as azp, appid, or cid"
 // +kubebuilder:validation:XValidation:rule="!(has(self.allowPrivateIPs) && self.allowPrivateIPs) || (has(self.jwksUrl) && self.jwksUrl != \"\")",message="allowPrivateIPs requires jwksUrl to be set explicitly"
-// +kubebuilder:validation:XValidation:rule="has(self.jwtBearerGrant) || size(self.expectedAudience) > 0",message="expectedAudience is required unless jwtBearerGrant is configured"
-// +kubebuilder:validation:XValidation:rule="has(self.jwtBearerGrant) || size(self.allowedDelegateClients) > 0",message="allowedDelegateClients is required unless jwtBearerGrant is configured"
+// +kubebuilder:validation:XValidation:rule="has(self.jwtBearerGrant) || (has(self.expectedAudience) && size(self.expectedAudience) > 0)",message="expectedAudience is required unless jwtBearerGrant is configured"
+// +kubebuilder:validation:XValidation:rule="!((has(self.expectedAudience) && size(self.expectedAudience) > 0) || (has(self.actorClaim) && size(self.actorClaim) > 0) || (has(self.actorMatcher) && size(self.actorMatcher) > 0) || (has(self.allowMayAct) && self.allowMayAct)) || (has(self.allowedDelegateClients) && size(self.allowedDelegateClients) > 0)",message="allowedDelegateClients is required when expectedAudience, actorClaim, actorMatcher, or allowMayAct is set"
 //
 //nolint:lll // CEL validation rules exceed line length limit
 type TrustedIssuerConfig struct {
@@ -549,7 +558,7 @@ type JWTBearerSubjectBinding struct {
 	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=2048
-	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+$`
+	// +kubebuilder:validation:items:Pattern=`^https?://[^[:space:]]+$`
 	// +listType=atomic
 	AllowedResources []string `json:"allowedResources"`
 }

@@ -636,6 +636,14 @@ spec:
 
                         Delegation configuration remains required unless jwtBearerGrant is present,
                         preserving existing manifest validation while allowing a grant-only issuer.
+
+                        The allowedDelegateClients rule below mirrors validateDelegationPolicy
+                        (pkg/authserver/server/tokenexchange/multi_issuer_validator.go): it is
+                        keyed on whether ANY delegation field is set (expectedAudience,
+                        actorClaim, actorMatcher, allowMayAct), not merely on whether
+                        jwtBearerGrant is absent — an issuer can combine jwtBearerGrant with
+                        expectedAudience for RFC 8693 delegation on the same issuer, and that
+                        combination still requires allowedDelegateClients at the Go level.
                       properties:
                         actorClaim:
                           description: |-
@@ -759,7 +767,7 @@ spec:
                                     items:
                                       maxLength: 2048
                                       minLength: 1
-                                      pattern: ^[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+$
+                                      pattern: ^https?://[^[:space:]]+$
                                       type: string
                                     maxItems: 50
                                     minItems: 1
@@ -812,12 +820,16 @@ spec:
                           || (has(self.jwksUrl) && self.jwksUrl != "")'
                       - message: expectedAudience is required unless jwtBearerGrant
                           is configured
-                        rule: has(self.jwtBearerGrant) || size(self.expectedAudience)
-                          > 0
-                      - message: allowedDelegateClients is required unless jwtBearerGrant
-                          is configured
-                        rule: has(self.jwtBearerGrant) || size(self.allowedDelegateClients)
-                          > 0
+                        rule: has(self.jwtBearerGrant) || (has(self.expectedAudience)
+                          && size(self.expectedAudience) > 0)
+                      - message: allowedDelegateClients is required when expectedAudience,
+                          actorClaim, actorMatcher, or allowMayAct is set
+                        rule: '!((has(self.expectedAudience) && size(self.expectedAudience)
+                          > 0) || (has(self.actorClaim) && size(self.actorClaim) >
+                          0) || (has(self.actorMatcher) && size(self.actorMatcher)
+                          > 0) || (has(self.allowMayAct) && self.allowMayAct)) ||
+                          (has(self.allowedDelegateClients) && size(self.allowedDelegateClients)
+                          > 0)'
                     maxItems: 20
                     type: array
                     x-kubernetes-list-type: atomic
@@ -4577,6 +4589,14 @@ spec:
 
                         Delegation configuration remains required unless jwtBearerGrant is present,
                         preserving existing manifest validation while allowing a grant-only issuer.
+
+                        The allowedDelegateClients rule below mirrors validateDelegationPolicy
+                        (pkg/authserver/server/tokenexchange/multi_issuer_validator.go): it is
+                        keyed on whether ANY delegation field is set (expectedAudience,
+                        actorClaim, actorMatcher, allowMayAct), not merely on whether
+                        jwtBearerGrant is absent — an issuer can combine jwtBearerGrant with
+                        expectedAudience for RFC 8693 delegation on the same issuer, and that
+                        combination still requires allowedDelegateClients at the Go level.
                       properties:
                         actorClaim:
                           description: |-
@@ -4700,7 +4720,7 @@ spec:
                                     items:
                                       maxLength: 2048
                                       minLength: 1
-                                      pattern: ^[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+$
+                                      pattern: ^https?://[^[:space:]]+$
                                       type: string
                                     maxItems: 50
                                     minItems: 1
@@ -4753,12 +4773,16 @@ spec:
                           || (has(self.jwksUrl) && self.jwksUrl != "")'
                       - message: expectedAudience is required unless jwtBearerGrant
                           is configured
-                        rule: has(self.jwtBearerGrant) || size(self.expectedAudience)
-                          > 0
-                      - message: allowedDelegateClients is required unless jwtBearerGrant
-                          is configured
-                        rule: has(self.jwtBearerGrant) || size(self.allowedDelegateClients)
-                          > 0
+                        rule: has(self.jwtBearerGrant) || (has(self.expectedAudience)
+                          && size(self.expectedAudience) > 0)
+                      - message: allowedDelegateClients is required when expectedAudience,
+                          actorClaim, actorMatcher, or allowMayAct is set
+                        rule: '!((has(self.expectedAudience) && size(self.expectedAudience)
+                          > 0) || (has(self.actorClaim) && size(self.actorClaim) >
+                          0) || (has(self.actorMatcher) && size(self.actorMatcher)
+                          > 0) || (has(self.allowMayAct) && self.allowMayAct)) ||
+                          (has(self.allowedDelegateClients) && size(self.allowedDelegateClients)
+                          > 0)'
                     maxItems: 20
                     type: array
                     x-kubernetes-list-type: atomic

@@ -43,7 +43,7 @@ var _ = Describe("MCPExternalAuthConfig JWT-bearer grant schema validation", Lab
 		}
 	}
 
-	It("accepts a positive metav1.Duration", func() {
+	It("accepts a grant-only issuer with a positive maxAssertionAge", func() {
 		Expect(k8sClient.Create(ctx, makeConfig("jwt-bearer-positive-age", time.Minute))).To(Succeed())
 	})
 

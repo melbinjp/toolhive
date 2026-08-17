@@ -67,7 +67,7 @@ func TestFactory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			f, err := Factory(tt.delegationLifespan, nil, tt.configuredDelegateClients)
+			f, err := Factory(tt.delegationLifespan, nil, tt.configuredDelegateClients, nil)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
@@ -175,7 +175,7 @@ func TestFactory_ValidatorSelection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			f, err := Factory(15*time.Minute, tt.trustedIssuers, nil)
+			f, err := Factory(15*time.Minute, tt.trustedIssuers, nil, nil)
 			require.NoError(t, err)
 
 			cfg := buildTestAuthServerConfig(t)

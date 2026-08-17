@@ -287,18 +287,36 @@ func buildProvider(
 	for i, c := range cfg.DelegateClients {
 		delegateClientIDs[i] = c.ClientID
 	}
-	tokenExchangeFactory, err := tokenexchange.Factory(cfg.DelegationTokenLifespan, cfg.TrustedIssuers, delegateClientIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token exchange factory: %w", err)
-	}
 	jwtBearerEnabled := false
 	for _, issuer := range cfg.TrustedIssuers {
 		jwtBearerEnabled = jwtBearerEnabled || issuer.JWTBearerGrant != nil
 	}
+
+	// Built once, up front, and handed to both factories below when the
+	// JWT-bearer grant is also enabled: otherwise each factory would build
+	// its own MultiIssuerTokenValidator over the same trusted issuers,
+	// doubling every issuer's JWKS cache and background refresh goroutines
+	// for no benefit. authServerConfig is the exact *AuthorizationServerConfig
+	// each factory closure would otherwise receive at call time (see
+	// createProvider/NewAuthorizationServer), so building it here first is
+	// equivalent.
+	var shared *tokenexchange.MultiIssuerTokenValidator
+	if jwtBearerEnabled {
+		var err error
+		shared, err = tokenexchange.NewSharedTrustedIssuerValidator(authServerConfig, cfg.TrustedIssuers)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create shared trusted-issuer validator: %w", err)
+		}
+	}
+
+	tokenExchangeFactory, err := tokenexchange.Factory(cfg.DelegationTokenLifespan, cfg.TrustedIssuers, delegateClientIDs, shared)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token exchange factory: %w", err)
+	}
 	if !jwtBearerEnabled {
 		return createProvider(authServerConfig, stor, tokenExchangeFactory)
 	}
-	jwtBearerFactory, err := tokenexchange.JWTBearerIssuanceFactory(cfg.TrustedIssuers)
+	jwtBearerFactory, err := tokenexchange.JWTBearerIssuanceFactory(cfg.TrustedIssuers, shared)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JWT-bearer factory: %w", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 
 	mcpv1beta1 "github.com/stacklok/toolhive/cmd/thv-operator/api/v1beta1"
 	"github.com/stacklok/toolhive/cmd/thv-operator/api/v1beta1/v1beta1test"
+	"github.com/stacklok/toolhive/test/e2e"
 	"github.com/stacklok/toolhive/test/e2e/images"
 )
 
@@ -171,32 +173,86 @@ var _ = ginkgo.Describe("MCPExternalAuthConfig JWT-bearer grant", ginkgo.Ordered
 		}, timeout, pollInterval).Should(gomega.BeTrue())
 	})
 
-	ginkgo.It("issues an access token without client authentication for the exact subject and resource", func() {
+	ginkgo.It("issues an access token bound to the exact subject and resource, usable against the proxy", func() {
 		port, cleanup, err := startRateLimitServicePortForward("mcp-"+serverName+"-proxy", 8080)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer cleanup()
 
-		assertion := mintJWTBearerAssertion(oidcLocalPort, externalSub, tokenEndpointAudience(serverIssuer), "success-jti", time.Now())
-		status, body := requestJWTBearerGrant(fmt.Sprintf("http://localhost:%d", port), assertion, resource)
+		issuedAt := time.Now()
+		assertion := mintJWTBearerAssertion(oidcLocalPort, externalSub, tokenEndpointAudience(serverIssuer), "success-jti", issuedAt)
+		endpoint := fmt.Sprintf("http://localhost:%d", port)
+		status, body := requestJWTBearerGrant(endpoint, assertion, resource)
 		gomega.Expect(status).To(gomega.Equal(http.StatusOK), string(body))
 		var response struct {
 			AccessToken string `json:"access_token"`
+			ExpiresIn   int64  `json:"expires_in"`
 		}
 		gomega.Expect(json.Unmarshal(body, &response)).To(gomega.Succeed())
 		gomega.Expect(response.AccessToken).NotTo(gomega.BeEmpty())
+
+		ginkgo.By("decoding the issued token and checking its audience, expiry, and synthetic identity")
+		claims := decodeUnverifiedJWTClaims(response.AccessToken)
+		gomega.Expect(claims["aud"]).To(gomega.ConsistOf(resource),
+			"the issued token must be scoped to exactly the requested resource")
+		gomega.Expect(claims["sub"]).To(gomega.Equal(oidcIssuer+"#"+externalSub),
+			"the synthetic subject must bind the assertion issuer and subject, not a bare client identity")
+		clientID, ok := claims["client_id"].(string)
+		gomega.Expect(ok).To(gomega.BeTrue(), "client_id claim must be a string: %#v", claims["client_id"])
+		gomega.Expect(clientID).To(gomega.HavePrefix("synthetic:"),
+			"a clientless grant must carry a synthetic client identity, never a real registered client")
+		expFloat, ok := claims["exp"].(float64)
+		gomega.Expect(ok).To(gomega.BeTrue(), "exp claim must be a number: %#v", claims["exp"])
+		expiry := time.Unix(int64(expFloat), 0)
+		gomega.Expect(expiry).To(gomega.BeTemporally("<=", issuedAt.Add(time.Minute+15*time.Minute)),
+			"the token lifetime must be bounded by the access-token lifespan even though the assertion's own exp is far shorter")
+		gomega.Expect(expiry).To(gomega.BeTemporally(">", issuedAt),
+			"the issued token must not already be expired")
+
+		ginkgo.By("using the issued token to make a real authenticated MCP request through the proxy")
+		mcpURL := endpoint + "/mcp"
+		rawClient, err := e2e.NewRawMCPClient(30 * time.Second)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		var sessionID string
+		gomega.Eventually(func() error {
+			var initErr error
+			sessionID, initErr = legacySessionInit(rawClient, mcpURL, "jwt-bearer-e2e", bearerHeader(response.AccessToken))
+			return initErr
+		}, timeout, pollInterval).Should(gomega.Succeed(),
+			"the proxy must accept the JWT-bearer-issued token as a normal bearer token")
+
+		toolCallReq, err := e2e.NewLegacyRequest("tools/call", map[string]any{
+			"name":      "echo",
+			"arguments": map[string]any{"input": "jwt-bearer-e2e"},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		toolCallReq.WithSessionID(sessionID)
+		toolCallReq.SetHeader("Authorization", "Bearer "+response.AccessToken)
+		toolResp, err := rawClient.Send(context.Background(), mcpURL, toolCallReq)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(toolResp.StatusCode).To(gomega.Equal(http.StatusOK), string(toolResp.Body))
+
+		var toolResult struct {
+			Result struct {
+				IsError bool `json:"isError"`
+			} `json:"result"`
+		}
+		gomega.Expect(json.Unmarshal(toolResp.Body, &toolResult)).To(gomega.Succeed())
+		gomega.Expect(toolResult.Result.IsError).To(gomega.BeFalse(),
+			"the echo tool call must succeed once authenticated with the JWT-bearer-issued token: %s", toolResp.Body)
 	})
 
-	ginkgo.It("rejects an assertion requesting an unauthorized resource", func() {
+	ginkgo.It("rejects an assertion requesting an unauthorized resource with invalid_target", func() {
 		port, cleanup, err := startRateLimitServicePortForward("mcp-"+serverName+"-proxy", 8080)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer cleanup()
 
 		assertion := mintJWTBearerAssertion(oidcLocalPort, externalSub, tokenEndpointAudience(serverIssuer), "wrong-resource-jti", time.Now())
-		status, _ := requestJWTBearerGrant(fmt.Sprintf("http://localhost:%d", port), assertion, "https://resource.example/forbidden")
+		status, body := requestJWTBearerGrant(fmt.Sprintf("http://localhost:%d", port), assertion, "https://resource.example/forbidden")
 		gomega.Expect(status).NotTo(gomega.Equal(http.StatusOK))
+		gomega.Expect(decodeOAuthError(body)).To(gomega.Equal("invalid_request"))
 	})
 
-	ginkgo.It("rejects replay of a JWT-bearer assertion", func() {
+	ginkgo.It("rejects replay of a JWT-bearer assertion with invalid_grant", func() {
 		port, cleanup, err := startRateLimitServicePortForward("mcp-"+serverName+"-proxy", 8080)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer cleanup()
@@ -205,10 +261,43 @@ var _ = ginkgo.Describe("MCPExternalAuthConfig JWT-bearer grant", ginkgo.Ordered
 		assertion := mintJWTBearerAssertion(oidcLocalPort, externalSub, tokenEndpointAudience(serverIssuer), "replayed-jti", time.Now())
 		status, body := requestJWTBearerGrant(endpoint, assertion, resource)
 		gomega.Expect(status).To(gomega.Equal(http.StatusOK), string(body))
-		status, _ = requestJWTBearerGrant(endpoint, assertion, resource)
+		status, body = requestJWTBearerGrant(endpoint, assertion, resource)
 		gomega.Expect(status).NotTo(gomega.Equal(http.StatusOK))
+		gomega.Expect(decodeOAuthError(body)).To(gomega.Equal("invalid_grant"))
 	})
 })
+
+// bearerHeader builds the extra-header map that carries a bearer token on a
+// raw Legacy MCP request.
+func bearerHeader(token string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + token}
+}
+
+// decodeOAuthError extracts the RFC 6749 "error" field from an OAuth token
+// endpoint error response, failing the test with a clear message if the body
+// isn't a JSON object with that field.
+func decodeOAuthError(body []byte) string {
+	var oauthErr struct {
+		Error string `json:"error"`
+	}
+	gomega.ExpectWithOffset(1, json.Unmarshal(body, &oauthErr)).To(gomega.Succeed(), "error body: %s", body)
+	gomega.ExpectWithOffset(1, oauthErr.Error).NotTo(gomega.BeEmpty(), "error body: %s", body)
+	return oauthErr.Error
+}
+
+// decodeUnverifiedJWTClaims decodes a JWT's claims without verifying its
+// signature. The issued access token's own authenticity is already
+// established by having come back from a 200 response on this server's own
+// /oauth/token — this only inspects its content.
+func decodeUnverifiedJWTClaims(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	gomega.ExpectWithOffset(1, parts).To(gomega.HaveLen(3), "access token must be a JWT: %s", token)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	claims := map[string]any{}
+	gomega.ExpectWithOffset(1, json.Unmarshal(payload, &claims)).To(gomega.Succeed())
+	return claims
+}
 
 func tokenEndpointAudience(issuer string) string {
 	return issuer + "/oauth/token"

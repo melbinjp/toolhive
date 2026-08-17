@@ -948,6 +948,52 @@ func TestRedisStorage_AccessToken(t *testing.T) {
 			requireRedisNotFoundError(t, err)
 		})
 	})
+
+	// A clientless grant (e.g. RFC 7523 JWT-bearer) attaches a synthetic
+	// client (NewSyntheticClient) rather than a registered one, since it
+	// skips client authentication entirely and never has a real
+	// fosite.Client. Before storedSession.ClientID handled that case,
+	// marshalRequester's request.GetClient().GetID() call panicked on the
+	// resulting nil interface for every Redis-backed deployment — this test
+	// proves the full create/get round trip through Redis serialization
+	// works without ever registering the client.
+	t.Run("synthetic client from a clientless grant round-trips without registration", func(t *testing.T) {
+		withRedisStorage(t, func(ctx context.Context, s *RedisStorage, _ *miniredis.Miniredis) {
+			syntheticID := SyntheticClientIDPrefix + "jwt-bearer-test"
+			request := newRedisTestRequester("jwt-bearer-req", NewSyntheticClient(syntheticID))
+
+			require.NoError(t, s.CreateAccessTokenSession(ctx, "jwt-bearer-sig", request))
+
+			retrieved, err := s.GetAccessTokenSession(ctx, "jwt-bearer-sig", nil)
+			require.NoError(t, err)
+			assert.Equal(t, request.GetID(), retrieved.GetID())
+			require.NotNil(t, retrieved.GetClient())
+			assert.Equal(t, syntheticID, retrieved.GetClient().GetID())
+			assert.True(t, retrieved.GetClient().IsPublic())
+		})
+	})
+}
+
+// TestMarshalRequester_NilClient is defense in depth alongside the synthetic
+// client mechanism above: a request whose GetClient() is nil (rather than a
+// synthetic one) must not panic when marshaled.
+func TestMarshalRequester_NilClient(t *testing.T) {
+	t.Parallel()
+
+	request := &fosite.Request{
+		ID:          "req-nil-client",
+		RequestedAt: time.Now(),
+		Client:      nil,
+		Form:        make(url.Values),
+		Session:     session.New("test-subject", "", "", session.UserClaims{}),
+	}
+
+	data, err := marshalRequester(request)
+	require.NoError(t, err)
+
+	var stored storedSession
+	require.NoError(t, json.Unmarshal(data, &stored))
+	assert.Empty(t, stored.ClientID)
 }
 
 // --- Session Round-Trip Tests ---

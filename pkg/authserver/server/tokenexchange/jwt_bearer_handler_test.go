@@ -24,15 +24,22 @@ import (
 const testTokenEndpoint = "https://auth.example.com/oauth/token"
 
 type testJWTBearerAssertionValidator struct {
-	calls int
-	err   error
+	calls  int
+	err    error
+	claims *ValidatedClaims
 }
 
 func (v *testJWTBearerAssertionValidator) ValidateJWTBearerAssertion(
 	context.Context, string, string,
 ) (*ValidatedClaims, error) {
 	v.calls++
-	return &ValidatedClaims{}, v.err
+	if v.err != nil {
+		return nil, v.err
+	}
+	if v.claims != nil {
+		return v.claims, nil
+	}
+	return &ValidatedClaims{}, nil
 }
 
 func newJWTBearerRequest(form map[string][]string) *fosite.AccessRequest {

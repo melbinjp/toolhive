@@ -514,6 +514,96 @@ delegate_clients:
    delegated token — it must also be signed by a configured trusted issuer
    and satisfy one of the consent signals above.
 
+## RFC 7523 JWT-bearer grant
+
+The embedded authorization server also supports the plain RFC 7523 JWT-bearer
+grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`), a separate grant from
+RFC 8693 token exchange above. Where token exchange lets an already-authenticated
+ToolHive client trade a subject token it holds for a delegated one, the
+JWT-bearer grant lets an external party present a signed assertion directly at
+`/oauth/token` and receive a ToolHive access token — no ToolHive client, no
+delegate client, no consent signal (`may_act`/`allowedActors`/`actorMatcher`)
+involved. It is enabled per trusted issuer by setting
+`TrustedIssuer.JWTBearerGrant` (`jwt_bearer_grant` on a hand-written
+`authserver.RunConfig`, `jwtBearerGrant` on the operator's
+`TrustedIssuerConfig`) — independent of that issuer's RFC 8693 delegation
+fields, though both may be configured on the same issuer.
+
+- **Clientless.** `JWTBearerHandler.CanSkipClientAuth` returns true for a
+  plain assertion, so fosite never authenticates a `client_id`/`client_secret`
+  and never attaches a client to the access request. Every storage backend's
+  request-marshaling path still needs a non-nil `fosite.Client`, so the
+  handler attaches a synthetic one — see "Synthetic subject and client
+  identity" below.
+- **Assertion bounds.** Beyond the standard RFC 7523 §3 claims (`iss`, `sub`,
+  `aud`, `exp`; `jti` and `iat` are required here specifically, for replay
+  tracking and the age bound below), two policy-level bounds apply:
+  - `JWTBearerGrantPolicy.MaxAssertionAge` caps `exp - iat` — independent of
+    `exp` itself, which is still checked for plain expiry. This bounds how
+    long an assertion can claim to be "fresh" for, not just how long it
+    remains unexpired.
+  - `JWTBearerGrantPolicy.AcceptedAudiences` is the set of "this AS" identity
+    strings the assertion's `aud` must intersect (`audienceIntersects`),
+    checked by exact-match membership rather than equality — RFC 7523 §3
+    permits a multi-valued `aud`, so an assertion may additionally name other
+    audiences without losing its match. Defaults to `[tokenEndpoint]` when
+    unset, preserving the original exact-endpoint-match behavior. This exists
+    to let an issuer's assertions target this AS by more than one valid name
+    (e.g. across an issuer/token-endpoint URL migration) — it is deliberately
+    NOT the same relaxation as accepting an arbitrary RFC 8707 resource
+    audience, which would let any resource-scoped token satisfy the grant
+    instead of only tokens minted for this AS specifically.
+
+  Beyond cryptographic and claim validation, `JWTBearerGrantPolicy.SubjectBindings`
+  is an exact-match allowlist: an assertion's `sub` must have a configured
+  binding, and the request's `resource` parameter (required, exactly one)
+  must be one of that binding's `allowed_resources`. There is no wildcard
+  subject or resource — every accepted assertion subject and resource pair is
+  named explicitly.
+- **Synthetic subject and client identity.** The issued token's `sub` is
+  `<assertion issuer>#<assertion subject>` (`session.New`'s first argument,
+  matching the delegated-token subject qualification pattern in [Accepted
+  limitations](#accepted-limitations) #2, so it can never collide with a
+  native ToolHive UUID subject). Its `client_id` claim is a synthetic value —
+  `storage.SyntheticClientIDPrefix` followed by a SHA-256 digest of
+  `<issuer>\x00<subject>` (`jwtBearerClientID`) — never a real registered
+  `fosite.Client`. `storage.NewSyntheticClient` builds the client object
+  attached to the access request, and `storage.IsSyntheticClientID` lets a
+  storage backend reconstruct it on read (e.g. `RedisStorage.unmarshalRequester`)
+  without a client-registry lookup, since it was never registered via
+  `RegisterClient`. This mechanism is generic — any future clientless grant
+  can reuse it, not just this one.
+- **Replay model.** `storage.AssertionJWTConsumer.ConsumeAssertionJWT` atomically
+  records `(purpose, issuer, jti)` as consumed, keyed until the assertion's own
+  `exp`, and returns `fosite.ErrJTIKnown` on a repeat. The JWT-bearer grant's
+  purpose is `"jwt-bearer"` (`jwtBearerReplayPurpose`), kept separate from any
+  other assertion-consuming grant so a reused `jti` cannot be laundered across
+  purposes. Consumption happens *before* issuance: if token issuance somehow
+  fails after that point, the assertion stays consumed rather than becoming
+  replayable — a fail-closed choice that costs an otherwise-valid assertion
+  its one use on an issuance-side error, rather than risk a second grant on a
+  retried replay.
+- **Discovery.** `grant_types_supported` in `/.well-known/oauth-authorization-server`
+  and `/.well-known/openid-configuration` advertises
+  `urn:ietf:params:oauth:grant-type:jwt-bearer` only when at least one trusted
+  issuer has `jwtBearerGrant` configured (`AuthorizationServerConfig.JWTBearerGrantEnabled`,
+  computed by the same `jwtBearerGrantEnabled` helper that decides whether
+  `buildProvider` registers the grant with fosite in the first place — the two
+  can't drift out of sync).
+- **Validator sharing.** When both RFC 8693 token exchange and the JWT-bearer
+  grant are enabled for the same trusted issuers, `buildProvider` constructs a
+  single `MultiIssuerTokenValidator` (`tokenexchange.NewSharedTrustedIssuerValidator`)
+  and passes it to both `tokenexchange.Factory` and
+  `tokenexchange.JWTBearerIssuanceFactory`, rather than each building its own —
+  a `MultiIssuerTokenValidator` registers a `jwk.Cache` and background refresh
+  goroutines per issuer, so building two would double that cost with no
+  benefit.
+- **No delegation consent.** The JWT-bearer grant does not apply
+  `allowedActors`, `actorMatcher`, or `may_act` — those are RFC 8693 delegation
+  concepts. An issuer's JWT-bearer subjects are authorized entirely by
+  `SubjectBindings`, independent of whatever `allowedActors`/`allowMayAct` that
+  same issuer may also have configured for delegation.
+
 ## Operational notes
 
 - **Audience.** The requested audience is bounded by the subject token's own
@@ -591,6 +681,9 @@ delegate_clients:
 - `cmd/thv-operator/pkg/controllerutil/authserver.go` — `buildDelegateClientRunConfigs`, `buildTrustedIssuerRunConfigs`, `BuildAuthServerRunConfig`
 - `pkg/authserver/runner/embeddedauthserver.go` — delegate-client secret-reference resolution at startup
 - `pkg/authserver/server_impl.go` — static delegate-client registration and precedence over an existing storage registration
-- `pkg/authserver/server/handlers/discovery.go` — advertised token-exchange grant and client-secret authentication methods
+- `pkg/authserver/server/handlers/discovery.go` — advertised token-exchange and JWT-bearer grants, client-secret authentication methods
 - `cmd/thv-operator/api/v1beta1/mcpexternalauthconfig_types.go` — shared `DelegateClientConfig` CRD contract
 - `cmd/thv-operator/pkg/controllerutil/authserver.go` — Secret-reference to pod-environment conversion
+- `pkg/authserver/server/tokenexchange/jwt_bearer_handler.go` — `JWTBearerHandler`, `JWTBearerIssuanceFactory`, `NewSharedTrustedIssuerValidator`, synthetic client-ID minting
+- `pkg/authserver/storage/types.go` — `SyntheticClientIDPrefix`, `NewSyntheticClient`, `IsSyntheticClientID`
+- `pkg/authserver/storage/redis.go` — synthetic-client-aware `marshalRequester`/`unmarshalRequester`

@@ -61,7 +61,7 @@ func TestJWTBearerHandler_MatchingAndClientAuth(t *testing.T) {
 
 	tj := newTestJWKS(t)
 	validator := &testJWTBearerAssertionValidator{}
-	h, err := NewJWTBearerHandler(validator, testTokenEndpoint)
+	h, err := newJWTBearerHandler(validator, testTokenEndpoint)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -138,9 +138,15 @@ func TestJWTBearerHandler_AssertionFormAndType(t *testing.T) {
 		wantErrContain string
 	}{
 		{
-			name:       "single plain assertion is validated",
-			assertions: []string{signAssertionWithType(t, tj, nil)},
-			wantCalls:  1,
+			// newJWTBearerHandler alone (no policies/consumer wired) always
+			// fails closed after validating the assertion — this handler is
+			// never wired into a real token endpoint on its own; see its doc
+			// comment. wantCalls == 1 proves form/type validation passed and
+			// the validator ran.
+			name:           "single plain assertion is validated but the unwired handler fails closed",
+			assertions:     []string{signAssertionWithType(t, tj, nil)},
+			wantCalls:      1,
+			wantErrContain: "issuer is not enabled",
 		},
 		{
 			name:           "missing assertion is rejected",
@@ -177,7 +183,7 @@ func TestJWTBearerHandler_AssertionFormAndType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			validator := &testJWTBearerAssertionValidator{}
-			h, err := NewJWTBearerHandler(validator, testTokenEndpoint)
+			h, err := newJWTBearerHandler(validator, testTokenEndpoint)
 			require.NoError(t, err)
 			req := newJWTBearerRequest(map[string][]string{"assertion": tt.assertions})
 
@@ -193,16 +199,6 @@ func TestJWTBearerHandler_AssertionFormAndType(t *testing.T) {
 			assert.Equal(t, tt.wantCalls, validator.calls)
 		})
 	}
-}
-
-func TestJWTBearerFactory(t *testing.T) {
-	t.Parallel()
-
-	factory, err := JWTBearerFactory(&testJWTBearerAssertionValidator{}, testTokenEndpoint)
-	require.NoError(t, err)
-	handler, err := factory(nil, nil, nil)
-	require.NoError(t, err)
-	assert.IsType(t, &JWTBearerHandler{}, handler)
 }
 
 func TestNewJWTBearerHandler(t *testing.T) {
@@ -222,7 +218,7 @@ func TestNewJWTBearerHandler(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h, err := NewJWTBearerHandler(tt.validator, tt.endpoint)
+			h, err := newJWTBearerHandler(tt.validator, tt.endpoint)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -45,10 +46,18 @@ type JWTBearerHandler struct {
 	policies      map[string]*JWTBearerGrantPolicy
 }
 
-// NewJWTBearerHandler constructs a validation-only JWT-bearer handler. Production
-// composition uses NewJWTBearerIssuanceHandler, which additionally requires replay
-// storage and issuance dependencies.
-func NewJWTBearerHandler(validator JWTBearerAssertionValidator, tokenEndpoint string) (*JWTBearerHandler, error) {
+// newJWTBearerHandler constructs the shared plain-assertion-matching core of
+// JWTBearerHandler: CanHandleTokenEndpointRequest, CanSkipClientAuth, and
+// request-form/assertion-type validation. It is not, by itself, safe to wire
+// into a real token endpoint — it has no policy, replay-tracking, or
+// issuance dependencies. Kept unexported because of that: the only
+// production path is newJWTBearerIssuanceHandler, which always supplies
+// them. In-package tests use it directly only to exercise this seam in
+// isolation (see jwt_bearer_handler_test.go); HandleTokenEndpointRequest
+// fails closed rather than succeeding when consumer/policies are unset (see
+// below), so an accidental use of this constructor alone can never look like
+// a working grant.
+func newJWTBearerHandler(validator JWTBearerAssertionValidator, tokenEndpoint string) (*JWTBearerHandler, error) {
 	if validator == nil {
 		return nil, errors.New("JWT-bearer assertion validator must not be nil")
 	}
@@ -67,7 +76,7 @@ func newJWTBearerIssuanceHandler(
 	config *fosite.Config, strategy oauth2.AccessTokenStrategy, tokenStorage oauth2.AccessTokenStorage,
 	trustedIssuers []TrustedIssuer,
 ) (*JWTBearerHandler, error) {
-	handler, err := NewJWTBearerHandler(validator, tokenEndpoint)
+	handler, err := newJWTBearerHandler(validator, tokenEndpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -126,12 +135,17 @@ func (h *JWTBearerHandler) HandleTokenEndpointRequest(ctx context.Context, reque
 	if err != nil {
 		return errorsx.WithStack(fosite.ErrInvalidGrant.WithHint("The JWT bearer assertion is invalid or could not be verified."))
 	}
-	if h.consumer == nil {
-		return nil // validation-only constructor, retained for its focused seam tests.
-	}
+	// h.policies is nil when this handler was built by newJWTBearerHandler
+	// directly rather than newJWTBearerIssuanceHandler (the seam tests use it
+	// this way) — a nil map lookup below always misses, so this request is
+	// rejected rather than treated as authorized. Only newJWTBearerIssuanceHandler
+	// is wired into a real token endpoint; see its doc comment.
 	policy, ok := h.policies[claims.Issuer]
 	if !ok {
 		return errorsx.WithStack(fosite.ErrInvalidGrant.WithHint("The JWT bearer assertion issuer is not enabled for this grant."))
+	}
+	if h.consumer == nil {
+		return errorsx.WithStack(fosite.ErrServerError.WithHint("The JWT-bearer grant is not fully configured."))
 	}
 	resource, err := validateJWTBearerPolicy(requester.GetRequestForm(), claims, policy)
 	if err != nil {
@@ -154,10 +168,18 @@ func (h *JWTBearerHandler) HandleTokenEndpointRequest(ctx context.Context, reque
 	if remaining < lifetime {
 		lifetime = remaining
 	}
-	issuedSession := session.New(
-		claims.Issuer+"#"+claims.Subject, "",
-		jwtBearerClientID(claims.Issuer, claims.Subject), session.UserClaims{})
+	clientID := jwtBearerClientID(claims.Issuer, claims.Subject)
+	issuedSession := session.New(claims.Issuer+"#"+claims.Subject, "", clientID, session.UserClaims{})
 	issuedSession.SetExpiresAt(fosite.AccessToken, time.Now().UTC().Add(lifetime))
+	// This grant skips client authentication (CanSkipClientAuth), so fosite
+	// never populates requester's client — attach a synthetic one so every
+	// storage backend's marshal path (which calls GetClient unconditionally)
+	// has a real, non-nil client to serialize.
+	accessRequest, ok := requester.(*fosite.AccessRequest)
+	if !ok {
+		return errorsx.WithStack(fosite.ErrServerError.WithHint("The JWT-bearer grant requires a *fosite.AccessRequest."))
+	}
+	accessRequest.Client = storage.NewSyntheticClient(clientID)
 	requester.GrantAudience(resource)
 	requester.SetSession(issuedSession)
 	return nil
@@ -225,7 +247,7 @@ func containsString(values []string, target string) bool {
 
 func jwtBearerClientID(issuer, subject string) string {
 	digest := sha256.Sum256([]byte(issuer + "\x00" + subject))
-	return "jwt-bearer-" + base64.RawURLEncoding.EncodeToString(digest[:])
+	return storage.SyntheticClientIDPrefix + "jwt-bearer-" + base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func validateJWTBearerAssertionForm(form url.Values) (string, error) {
@@ -268,7 +290,10 @@ func assertionType(assertion string) string {
 	return typ
 }
 
-func validateJWTBearerAssertionClaims(claims jwt.Claims, issuer, tokenEndpoint string) error {
+// validateJWTBearerAssertionClaims validates the assertion's registered
+// claims. acceptedAudiences is the set of "this AS" identity strings the
+// assertion's "aud" must intersect — see JWTBearerGrantPolicy.AcceptedAudiences.
+func validateJWTBearerAssertionClaims(claims jwt.Claims, issuer string, acceptedAudiences []string) error {
 	if claims.Expiry == nil {
 		return errors.New("assertion is missing required 'exp' claim")
 	}
@@ -281,8 +306,8 @@ func validateJWTBearerAssertionClaims(claims jwt.Claims, issuer, tokenEndpoint s
 	if claims.ID == "" {
 		return errors.New("assertion is missing required 'jti' claim")
 	}
-	if len(claims.Audience) != 1 || claims.Audience[0] != tokenEndpoint {
-		return fmt.Errorf("assertion audience must be exactly token endpoint %q", tokenEndpoint)
+	if !audienceIntersects(claims.Audience, acceptedAudiences) {
+		return fmt.Errorf("assertion audience must include one of the accepted authorization server identities %q", acceptedAudiences)
 	}
 	if err := claims.ValidateWithLeeway(jwt.Expected{Issuer: issuer}, 0); err != nil {
 		return fmt.Errorf("assertion claims validation failed: %w", err)
@@ -290,9 +315,31 @@ func validateJWTBearerAssertionClaims(claims jwt.Claims, issuer, tokenEndpoint s
 	return nil
 }
 
+// audienceIntersects reports whether any value in audience is a member of
+// accepted. RFC 7523 §3 permits a multi-valued assertion "aud"; membership
+// (not equality) is deliberate so the assertion can additionally name other
+// audiences (e.g. an IdP-specific application ID) without losing its match
+// against one of this AS's own accepted identities.
+func audienceIntersects(audience jwt.Audience, accepted []string) bool {
+	for _, value := range audience {
+		if slices.Contains(accepted, value) {
+			return true
+		}
+	}
+	return false
+}
+
 // JWTBearerIssuanceFactory builds the production RFC 7523 handler. It is only
 // registered by composition when a trusted issuer opts into the grant.
-func JWTBearerIssuanceFactory(trustedIssuers []TrustedIssuer) (server.Factory, error) {
+//
+// shared, when non-nil, is used as the JWTBearerAssertionValidator instead of
+// building a second MultiIssuerTokenValidator: the RFC 8693 token-exchange
+// Factory and this one are usually enabled for the same trusted issuers, and
+// each MultiIssuerTokenValidator registers its own per-issuer jwk.Cache and
+// background refresh goroutines, so building one from each factory would
+// double that cost for no benefit. Pass nil to build one locally (e.g. when
+// only the JWT-bearer grant is enabled).
+func JWTBearerIssuanceFactory(trustedIssuers []TrustedIssuer, shared *MultiIssuerTokenValidator) (server.Factory, error) {
 	resolvedIssuers, err := ResolveJWTBearerGrantPolicies(trustedIssuers)
 	if err != nil {
 		return nil, fmt.Errorf("JWT-bearer trusted issuers: %w", err)
@@ -322,25 +369,19 @@ func JWTBearerIssuanceFactory(trustedIssuers []TrustedIssuer) (server.Factory, e
 				}
 			}
 		}
-		selfValidator, err := NewSelfIssuedTokenValidator(config.PublicJWKS(), config.GetAccessTokenIssuer(), config.AllowedAudiences)
-		if err != nil {
-			return nil, fmt.Errorf("JWT-bearer: failed to create self validator: %w", err)
-		}
-		validator, err := NewMultiIssuerTokenValidator(selfValidator, config.GetAccessTokenIssuer(), resolvedIssuers)
-		if err != nil {
-			return nil, fmt.Errorf("JWT-bearer: trusted_issuers: %w", err)
+		var validator JWTBearerAssertionValidator = shared
+		if shared == nil {
+			selfValidator, err := NewSelfIssuedTokenValidator(config.PublicJWKS(), config.GetAccessTokenIssuer(), config.AllowedAudiences)
+			if err != nil {
+				return nil, fmt.Errorf("JWT-bearer: failed to create self validator: %w", err)
+			}
+			validator, err = NewMultiIssuerTokenValidator(selfValidator, config.GetAccessTokenIssuer(), resolvedIssuers)
+			if err != nil {
+				return nil, fmt.Errorf("JWT-bearer: trusted_issuers: %w", err)
+			}
 		}
 		return newJWTBearerIssuanceHandler(validator, config.TokenURL, consumer, config.Config, atStrategy, atStorage, resolvedIssuers)
 	}, nil
-}
-
-// JWTBearerFactory returns a validation-only handler for focused callers.
-func JWTBearerFactory(validator JWTBearerAssertionValidator, tokenEndpoint string) (server.Factory, error) {
-	handler, err := NewJWTBearerHandler(validator, tokenEndpoint)
-	if err != nil {
-		return nil, err
-	}
-	return func(*server.AuthorizationServerConfig, fosite.Storage, any) (any, error) { return handler, nil }, nil
 }
 
 var _ fosite.TokenEndpointHandler = (*JWTBearerHandler)(nil)

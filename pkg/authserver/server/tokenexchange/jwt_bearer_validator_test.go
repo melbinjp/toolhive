@@ -38,14 +38,23 @@ func TestMultiIssuerTokenValidator_ValidateJWTBearerAssertion(t *testing.T) {
 			signer: externalJWKS,
 		},
 		{
-			name: "audience must exactly equal token endpoint",
+			name: "audience is accepted as long as it intersects the accepted set, even if multi-valued",
 			claims: func() jwt.Claims {
 				claims := jwtBearerExternalClaims()
 				claims.Audience = jwt.Audience{testTokenEndpoint, "https://other.example.com"}
 				return claims
 			},
+			signer: externalJWKS,
+		},
+		{
+			name: "audience is rejected when it matches none of the accepted authorization server identities",
+			claims: func() jwt.Claims {
+				claims := jwtBearerExternalClaims()
+				claims.Audience = jwt.Audience{"https://other.example.com"}
+				return claims
+			},
 			signer:  externalJWKS,
-			wantErr: "audience must be exactly",
+			wantErr: "assertion audience must include one of the accepted authorization server identities",
 		},
 		{
 			name: "subject is required",
@@ -129,6 +138,68 @@ func TestMultiIssuerTokenValidator_ValidateJWTBearerAssertion(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "ext-user-456", claims.Subject)
 			assert.Equal(t, testExternalIssuer, claims.Issuer)
+		})
+	}
+}
+
+// TestMultiIssuerTokenValidator_ValidateJWTBearerAssertion_AcceptedAudiences
+// covers JWTBearerGrant.AcceptedAudiences: it widens the accepted "aud" set
+// beyond the literal token endpoint, e.g. so an issuer's assertion can carry
+// an alternate identity for this AS (a migrated issuer URL) instead of the
+// endpoint the caller happens to be calling.
+func TestMultiIssuerTokenValidator_ValidateJWTBearerAssertion_AcceptedAudiences(t *testing.T) {
+	t.Parallel()
+
+	selfJWKS := newTestJWKS(t)
+	externalJWKS := newTestJWKS(t)
+	jwksServer := startJWKSServer(t, externalJWKS)
+	const alternateASIdentity = "https://auth.example.com/legacy-token-endpoint"
+	validator := newMultiValidator(t, selfJWKS, []TrustedIssuer{{
+		IssuerURL:              testExternalIssuer,
+		ExpectedAudience:       testExternalAudience,
+		JWKSURL:                jwksServer.URL + "/jwks",
+		AllowedDelegateClients: []string{anyDelegateClient},
+		JWTBearerGrant: &JWTBearerGrantPolicy{
+			MaxAssertionAge:   time.Hour.String(),
+			AcceptedAudiences: []string{alternateASIdentity},
+			SubjectBindings: []JWTBearerSubjectBinding{
+				{Subject: "ext-user-456", AllowedResources: []string{"https://mcp.example.com"}},
+			},
+		},
+	}})
+
+	tests := []struct {
+		name    string
+		aud     jwt.Audience
+		wantErr string
+	}{
+		{
+			name:    "the configured alternate identity is accepted",
+			aud:     jwt.Audience{alternateASIdentity},
+			wantErr: "",
+		},
+		{
+			name:    "the literal token endpoint is no longer accepted once AcceptedAudiences is configured",
+			aud:     jwt.Audience{testTokenEndpoint},
+			wantErr: "assertion audience must include one of the accepted authorization server identities",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			claims := jwtBearerExternalClaims()
+			claims.Audience = tt.aud
+			raw := externalJWKS.signToken(t, claims, nil)
+
+			validated, err := validator.ValidateJWTBearerAssertion(context.Background(), raw, testTokenEndpoint)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "ext-user-456", validated.Subject)
 		})
 	}
 }

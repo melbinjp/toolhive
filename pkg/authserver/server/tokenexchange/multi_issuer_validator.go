@@ -25,6 +25,7 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jwk"
 
 	"github.com/stacklok/toolhive-core/cel"
+	"github.com/stacklok/toolhive/pkg/authserver/server"
 	"github.com/stacklok/toolhive/pkg/networking"
 	"github.com/stacklok/toolhive/pkg/oauthproto"
 )
@@ -122,6 +123,16 @@ type JWTBearerSubjectBinding struct {
 type JWTBearerGrantPolicy struct {
 	MaxAssertionAge string                    `json:"max_assertion_age" yaml:"max_assertion_age"`
 	SubjectBindings []JWTBearerSubjectBinding `json:"subject_bindings" yaml:"subject_bindings"`
+	// AcceptedAudiences is the set of "this AS" identity strings an
+	// assertion's "aud" claim must intersect — e.g. to support migrating
+	// this server's issuer/token-endpoint URL, or exposing it under more
+	// than one valid name. Each value uniquely identifies this
+	// authorization server for this grant; it is NOT a resource/API
+	// identifier — a bare resource audience is deliberately not accepted
+	// here, that would let any RFC 8707 resource-scoped token satisfy the
+	// grant instead of only tokens minted for this AS. Defaults to
+	// [tokenEndpoint] when empty, preserving prior exact-match behavior.
+	AcceptedAudiences []string `json:"accepted_audiences,omitempty" yaml:"accepted_audiences,omitempty"`
 
 	maxAssertionAge time.Duration
 }
@@ -440,6 +451,7 @@ func cloneJWTBearerGrantPolicy(policy *JWTBearerGrantPolicy) *JWTBearerGrantPoli
 		return nil
 	}
 	clone := *policy
+	clone.AcceptedAudiences = slices.Clone(policy.AcceptedAudiences)
 	clone.SubjectBindings = make([]JWTBearerSubjectBinding, len(policy.SubjectBindings))
 	for i, binding := range policy.SubjectBindings {
 		clone.SubjectBindings[i] = JWTBearerSubjectBinding{
@@ -587,9 +599,11 @@ func (v *MultiIssuerTokenValidator) Validate(ctx context.Context, rawToken strin
 // delegation consent (AllowedActors, ActorMatcher, or may_act): a JWT-bearer
 // assertion's authorization policy is separate from delegation policy.
 //
-// The assertion audience must be exactly tokenEndpoint. The caller is
-// responsible for the phase-specific subject binding, maximum age, replay, and
-// issuance policy after this cryptographic verification succeeds.
+// The assertion audience must intersect the issuer's configured
+// JWTBearerGrant.AcceptedAudiences, or just tokenEndpoint when that is unset.
+// The caller is responsible for the phase-specific subject binding, maximum
+// age, replay, and issuance policy after this cryptographic verification
+// succeeds.
 func (v *MultiIssuerTokenValidator) ValidateJWTBearerAssertion(
 	ctx context.Context, rawToken, tokenEndpoint string,
 ) (*ValidatedClaims, error) {
@@ -611,7 +625,11 @@ func (v *MultiIssuerTokenValidator) ValidateJWTBearerAssertion(
 		return nil, err
 	}
 
-	if err := validateJWTBearerAssertionClaims(standardClaims, issuerConfig.IssuerURL, tokenEndpoint); err != nil {
+	acceptedAudiences := []string{tokenEndpoint}
+	if issuerConfig.JWTBearerGrant != nil && len(issuerConfig.JWTBearerGrant.AcceptedAudiences) > 0 {
+		acceptedAudiences = issuerConfig.JWTBearerGrant.AcceptedAudiences
+	}
+	if err := validateJWTBearerAssertionClaims(standardClaims, issuerConfig.IssuerURL, acceptedAudiences); err != nil {
 		return nil, err
 	}
 	return buildValidatedClaims(standardClaims, extraClaims), nil
@@ -1170,11 +1188,18 @@ func validateJWTBearerGrantPolicy(ti TrustedIssuer) error {
 	if err != nil || age <= 0 {
 		return fmt.Errorf("issuer_url %q: jwt_bearer_grant.max_assertion_age must be a positive duration", ti.IssuerURL)
 	}
-	if len(policy.SubjectBindings) == 0 {
+	if err := validateJWTBearerSubjectBindings(ti, policy.SubjectBindings); err != nil {
+		return err
+	}
+	return validateJWTBearerAcceptedAudiences(ti, policy.AcceptedAudiences)
+}
+
+func validateJWTBearerSubjectBindings(ti TrustedIssuer, bindings []JWTBearerSubjectBinding) error {
+	if len(bindings) == 0 {
 		return fmt.Errorf("issuer_url %q: jwt_bearer_grant.subject_bindings is required", ti.IssuerURL)
 	}
-	seenSubjects := make(map[string]struct{}, len(policy.SubjectBindings))
-	for _, binding := range policy.SubjectBindings {
+	seenSubjects := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
 		if binding.Subject == "" || binding.Subject == anyDelegateClient {
 			return fmt.Errorf("issuer_url %q: jwt_bearer_grant.subject_bindings contains an empty or wildcard subject", ti.IssuerURL)
 		}
@@ -1193,7 +1218,7 @@ func validateJWTBearerGrantPolicy(ti TrustedIssuer) error {
 					"issuer_url %q: jwt_bearer_grant subject %q has an empty or wildcard resource",
 					ti.IssuerURL, binding.Subject)
 			}
-			if err := validateResourceURI(resource); err != nil {
+			if err := server.ValidateAudienceURI(resource); err != nil {
 				return fmt.Errorf(
 					"issuer_url %q: jwt_bearer_grant subject %q resource %q is invalid: %w",
 					ti.IssuerURL, binding.Subject, resource, err)
@@ -1203,10 +1228,16 @@ func validateJWTBearerGrantPolicy(ti TrustedIssuer) error {
 	return nil
 }
 
-func validateResourceURI(resource string) error {
-	parsed, err := url.ParseRequestURI(resource)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return errors.New("must be an absolute URI")
+func validateJWTBearerAcceptedAudiences(ti TrustedIssuer, acceptedAudiences []string) error {
+	for _, audience := range acceptedAudiences {
+		if audience == "" {
+			return fmt.Errorf("issuer_url %q: jwt_bearer_grant.accepted_audiences must not contain an empty value", ti.IssuerURL)
+		}
+		if err := server.ValidateAudienceURI(audience); err != nil {
+			return fmt.Errorf(
+				"issuer_url %q: jwt_bearer_grant.accepted_audiences value %q is invalid: %w",
+				ti.IssuerURL, audience, err)
+		}
 	}
 	return nil
 }

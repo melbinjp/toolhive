@@ -107,14 +107,13 @@ func TestMultiIssuerTokenValidator_ValidateJWTBearerAssertion(t *testing.T) {
 			wantErr: "missing required 'iat'",
 		},
 		{
-			name: "JWT ID is required",
+			name: "missing JWT ID is accepted",
 			claims: func() jwt.Claims {
 				claims := jwtBearerExternalClaims()
 				claims.ID = ""
 				return claims
 			},
-			signer:  externalJWKS,
-			wantErr: "missing required 'jti'",
+			signer: externalJWKS,
 		},
 		{
 			name:    "invalid signature is rejected",

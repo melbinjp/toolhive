@@ -536,8 +536,8 @@ fields, though both may be configured on the same issuer.
   handler attaches a synthetic one — see "Synthetic subject and client
   identity" below.
 - **Assertion bounds.** Beyond the standard RFC 7523 §3 claims (`iss`, `sub`,
-  `aud`, `exp`; `jti` and `iat` are required here specifically, for replay
-  tracking and the age bound below), two policy-level bounds apply:
+  `aud`, `exp`; `iat` is required here specifically, for the age bound below),
+  two policy-level bounds apply:
   - `JWTBearerGrantPolicy.MaxAssertionAge` caps `exp - iat` — independent of
     `exp` itself, which is still checked for plain expiry. This bounds how
     long an assertion can claim to be "fresh" for, not just how long it
@@ -574,15 +574,22 @@ fields, though both may be configured on the same issuer.
   `RegisterClient`. This mechanism is generic — any future clientless grant
   can reuse it, not just this one.
 - **Replay model.** `storage.AssertionJWTConsumer.ConsumeAssertionJWT` atomically
-  records `(purpose, issuer, jti)` as consumed, keyed until the assertion's own
-  `exp`, and returns `fosite.ErrJTIKnown` on a repeat. The JWT-bearer grant's
-  purpose is `"jwt-bearer"` (`jwtBearerReplayPurpose`), kept separate from any
-  other assertion-consuming grant so a reused `jti` cannot be laundered across
-  purposes. Consumption happens *before* issuance: if token issuance somehow
-  fails after that point, the assertion stays consumed rather than becoming
-  replayable — a fail-closed choice that costs an otherwise-valid assertion
-  its one use on an issuance-side error, rather than risk a second grant on a
-  retried replay.
+  records `(purpose, issuer, key)` as consumed, keyed until the assertion's own
+  `exp`, and returns `fosite.ErrJTIKnown` on a repeat. `key` is not always the
+  assertion's `jti`: many real-world IdPs (e.g. Entra ID `client_credentials`
+  tokens) never emit one, so `jti` is not a required claim here. `assertionReplayKey`
+  uses `jti` when present, and otherwise falls back to a SHA-256 digest of the
+  raw assertion JWT string (prefixed `jwt-bearer-noJTI-` so it can never
+  collide with a real `jti`) — the raw assertion is itself guaranteed unique
+  per assertion (different signature bytes at minimum), so it is an equally
+  valid single-use key; replay protection is never skipped, only re-keyed. The
+  JWT-bearer grant's purpose is `"jwt-bearer"` (`jwtBearerReplayPurpose`), kept
+  separate from any other assertion-consuming grant so a reused key cannot be
+  laundered across purposes. Consumption happens *before* issuance: if token
+  issuance somehow fails after that point, the assertion stays consumed rather
+  than becoming replayable — a fail-closed choice that costs an otherwise-valid
+  assertion its one use on an issuance-side error, rather than risk a second
+  grant on a retried replay.
 - **Discovery.** `grant_types_supported` in `/.well-known/oauth-authorization-server`
   and `/.well-known/openid-configuration` advertises
   `urn:ietf:params:oauth:grant-type:jwt-bearer` only when at least one trusted

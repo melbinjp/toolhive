@@ -525,6 +525,35 @@ func TestIntegration_JWTBearerGrantReplay_RedisStorage(t *testing.T) {
 	assert.Equal(t, "invalid_grant", result["error"])
 }
 
+// TestIntegration_JWTBearerGrantReplay_NoJTI proves replay protection still
+// works for an assertion that omits the optional "jti" claim (as real-world
+// IdPs like Microsoft Entra ID commonly do): the fallback hash-of-assertion
+// key must catch the second use of the identical assertion, exactly as jti
+// would.
+func TestIntegration_JWTBearerGrantReplay_NoJTI(t *testing.T) {
+	t.Parallel()
+
+	ts, signAssertion := setupJWTBearerGrantTestServer(t)
+	now := time.Now()
+	assertion := signAssertion("external-subject", now, now.Add(2*time.Minute), "")
+	params := url.Values{
+		"grant_type": {oauthproto.GrantTypeJWTBearer},
+		"assertion":  {assertion},
+		"resource":   {testAudience},
+	}
+
+	response := makeTokenRequest(t, ts.Server.URL, params)
+	defer response.Body.Close()
+	result := parseTokenResponse(t, response)
+	require.Equal(t, http.StatusOK, response.StatusCode, result)
+
+	response = makeTokenRequest(t, ts.Server.URL, params)
+	defer response.Body.Close()
+	result = parseTokenResponse(t, response)
+	assert.Equal(t, http.StatusBadRequest, response.StatusCode, result)
+	assert.Equal(t, "invalid_grant", result["error"])
+}
+
 // TestIntegration_TokenEndpoint_Errors tests various error conditions at the token endpoint.
 func TestIntegration_TokenEndpoint_Errors(t *testing.T) {
 	t.Parallel()

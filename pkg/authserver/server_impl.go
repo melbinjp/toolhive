@@ -152,6 +152,7 @@ func newServer(ctx context.Context, cfg Config, stor storage.Storage, opts ...se
 		AllowConfidentialClientRegistration: cfg.AllowConfidentialClientRegistration,
 		HasStaticDelegateClients:            len(cfg.DelegateClients) > 0,
 		ForceConfidentialRedirectURIs:       cfg.ForceConfidentialRedirectURIs,
+		JWTBearerGrantEnabled:               jwtBearerGrantEnabled(cfg.TrustedIssuers),
 	}
 	authServerConfig, err := oauthserver.NewAuthorizationServerConfig(oauthParams)
 	if err != nil {
@@ -278,6 +279,19 @@ func decorateStorageForCIMD(cfg Config, stor storage.Storage) (storage.Storage, 
 	return decorated, nil
 }
 
+// jwtBearerGrantEnabled reports whether any trusted issuer has the RFC 7523
+// JWT-bearer grant configured. Shared by buildProvider (which decides
+// whether to register the grant with fosite) and the discovery metadata
+// (which decides whether to advertise it) so the two can never disagree.
+func jwtBearerGrantEnabled(trustedIssuers []tokenexchange.TrustedIssuer) bool {
+	for _, issuer := range trustedIssuers {
+		if issuer.JWTBearerGrant != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // buildProvider assembles the fosite OAuth2 provider, registering the RFC 8693
 // token-exchange handler as an extension grant alongside the standard grants.
 func buildProvider(
@@ -287,10 +301,7 @@ func buildProvider(
 	for i, c := range cfg.DelegateClients {
 		delegateClientIDs[i] = c.ClientID
 	}
-	jwtBearerEnabled := false
-	for _, issuer := range cfg.TrustedIssuers {
-		jwtBearerEnabled = jwtBearerEnabled || issuer.JWTBearerGrant != nil
-	}
+	jwtBearerEnabled := jwtBearerGrantEnabled(cfg.TrustedIssuers)
 
 	// Built once, up front, and handed to both factories below when the
 	// JWT-bearer grant is also enabled: otherwise each factory would build

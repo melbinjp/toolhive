@@ -116,6 +116,17 @@ func TestCIMDStorageDecorator_UnwrapReturnsBase(t *testing.T) {
 	assert.Same(t, base, dec.Unwrap())
 }
 
+func TestCIMDStorageDecorator_ConsumeAssertionJWTDelegatesToBase(t *testing.T) {
+	t.Parallel()
+	base := newTestBase(t)
+	dec := newEnabledDecorator(t, base, 10, time.Minute)
+	var consumer AssertionJWTConsumer = dec
+
+	exp := time.Now().Add(time.Hour)
+	require.NoError(t, consumer.ConsumeAssertionJWT(context.Background(), "jwt-bearer", "https://issuer.example", "jti", exp))
+	require.ErrorIs(t, consumer.ConsumeAssertionJWT(context.Background(), "jwt-bearer", "https://issuer.example", "jti", exp), fosite.ErrJTIKnown)
+}
+
 // --- GetClient delegation for non-CIMD IDs ---
 
 func TestCIMDStorageDecorator_GetClient_OpaqueIDDelegatesToBase(t *testing.T) {

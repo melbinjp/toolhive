@@ -291,7 +291,18 @@ func buildProvider(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token exchange factory: %w", err)
 	}
-	return createProvider(authServerConfig, stor, tokenExchangeFactory)
+	jwtBearerEnabled := false
+	for _, issuer := range cfg.TrustedIssuers {
+		jwtBearerEnabled = jwtBearerEnabled || issuer.JWTBearerGrant != nil
+	}
+	if !jwtBearerEnabled {
+		return createProvider(authServerConfig, stor, tokenExchangeFactory)
+	}
+	jwtBearerFactory, err := tokenexchange.JWTBearerIssuanceFactory(cfg.TrustedIssuers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create JWT-bearer factory: %w", err)
+	}
+	return createProvider(authServerConfig, stor, tokenExchangeFactory, jwtBearerFactory)
 }
 
 // buildHandlerOptions assembles the handlers.Option list for NewHandler: the

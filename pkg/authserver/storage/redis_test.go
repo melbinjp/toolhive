@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -752,6 +753,72 @@ func TestRedisStorage_ClientAssertionJWT(t *testing.T) {
 			err := s.ClientAssertionJWTValid(ctx, "expired-jti")
 			require.NoError(t, err) // Should be valid because expired JTI is not stored
 		})
+	})
+}
+
+func TestRedisStorage_ConsumeAssertionJWT(t *testing.T) {
+	withRedisStorage(t, func(ctx context.Context, s *RedisStorage, mr *miniredis.Miniredis) {
+		const purpose = "jwt-bearer"
+		const issuer = "https://issuer.example"
+		const jti = "shared-jti"
+		exp := time.Now().Add(time.Hour)
+		require.NoError(t, s.ConsumeAssertionJWT(ctx, purpose, issuer, jti, exp))
+		require.ErrorIs(t, s.ConsumeAssertionJWT(ctx, purpose, issuer, jti, exp), fosite.ErrJTIKnown)
+
+		assert.True(t, mr.Exists(redisAssertionJWTKey(s.keyPrefix, purpose, issuer, jti)))
+		assert.False(t, mr.Exists(redisKey(s.keyPrefix, KeyTypeAssertionJWT, jti)))
+
+		for _, assertion := range []struct {
+			purpose string
+			issuer  string
+		}{
+			{purpose: "client-auth", issuer: issuer},
+			{purpose: purpose, issuer: "https://other-issuer.example"},
+		} {
+			require.NoError(t, s.ConsumeAssertionJWT(ctx, assertion.purpose, assertion.issuer, jti, exp))
+		}
+
+		mr.FastForward(time.Hour + time.Second)
+		require.NoError(t, s.ConsumeAssertionJWT(ctx, purpose, issuer, jti, time.Now().Add(time.Hour)))
+	})
+}
+
+func TestRedisStorage_ConsumeAssertionJWT_Concurrent(t *testing.T) {
+	withRedisStorage(t, func(ctx context.Context, s *RedisStorage, _ *miniredis.Miniredis) {
+		const consumers = 32
+		var successes atomic.Int32
+		errs := make(chan error, consumers)
+		var wg sync.WaitGroup
+		wg.Add(consumers)
+		for range consumers {
+			go func() {
+				defer wg.Done()
+				err := s.ConsumeAssertionJWT(ctx, "jwt-bearer", "https://issuer.example", "concurrent-jti", time.Now().Add(time.Hour))
+				if err == nil {
+					successes.Add(1)
+					return
+				}
+				if !errors.Is(err, fosite.ErrJTIKnown) {
+					errs <- err
+				}
+			}()
+		}
+
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for concurrent assertion JWT consumers")
+		}
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+		assert.Equal(t, int32(1), successes.Load())
 	})
 }
 

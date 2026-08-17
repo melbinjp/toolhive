@@ -428,6 +428,27 @@ func (s *RedisStorage) SetClientAssertionJWT(ctx context.Context, jti string, ex
 	return s.client.Set(ctx, key, "1", ttl).Err()
 }
 
+// ConsumeAssertionJWT atomically records an assertion JWT as consumed until its
+// expiry. Reusing an unexpired (purpose, issuer, jti) tuple returns
+// fosite.ErrJTIKnown. Redis errors are returned so callers fail closed rather
+// than accepting an assertion whose replay status is unknown.
+func (s *RedisStorage) ConsumeAssertionJWT(ctx context.Context, purpose, issuer, jti string, exp time.Time) error {
+	ttl := time.Until(exp)
+	if ttl <= 0 {
+		return nil
+	}
+
+	key := redisAssertionJWTKey(s.keyPrefix, purpose, issuer, jti)
+	_, err := s.client.SetArgs(ctx, key, "1", redis.SetArgs{TTL: ttl, Mode: "NX"}).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return fosite.ErrJTIKnown
+		}
+		return fmt.Errorf("consume assertion JWT replay marker: %w", err)
+	}
+	return nil
+}
+
 // -----------------------
 // oauth2.AuthorizeCodeStorage
 // -----------------------

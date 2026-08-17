@@ -96,10 +96,11 @@ func (*Handler) CanHandleTokenEndpointRequest(_ context.Context, requester fosit
 	return requester.GetGrantTypes().ExactOne(oauthproto.GrantTypeTokenExchange)
 }
 
-// CanSkipClientAuth returns false because client authentication is required
-// for all token exchange requests.
-func (*Handler) CanSkipClientAuth(_ context.Context, _ fosite.AccessRequester) bool {
-	return false
+// CanSkipClientAuth returns false only for RFC 8693 token exchange. Other
+// handlers decide their own client-authentication requirements; in particular,
+// a plain RFC 7523 handler may skip client authentication.
+func (*Handler) CanSkipClientAuth(_ context.Context, requester fosite.AccessRequester) bool {
+	return !requester.GetGrantTypes().ExactOne(oauthproto.GrantTypeTokenExchange)
 }
 
 // HandleTokenEndpointRequest validates the token exchange request parameters,

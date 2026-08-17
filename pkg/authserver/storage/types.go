@@ -16,7 +16,7 @@
 // OAuth authorization server.
 package storage
 
-//go:generate mockgen -destination=mocks/mock_storage.go -package=mocks -source=types.go Storage,PendingAuthorizationStorage,ClientRegistry,UpstreamTokenStorage,UpstreamTokenRefresher,UserStorage,DCRCredentialStore
+//go:generate mockgen -destination=mocks/mock_storage.go -package=mocks -source=types.go Storage,PendingAuthorizationStorage,AssertionJWTConsumer,ClientRegistry,UpstreamTokenStorage,UpstreamTokenRefresher,UserStorage,DCRCredentialStore
 
 import (
 	"context"
@@ -523,6 +523,17 @@ type PendingAuthorizationStorage interface {
 	// DeletePendingAuthorization removes a pending authorization.
 	// Returns ErrNotFound if the state does not exist.
 	DeletePendingAuthorization(ctx context.Context, state string) error
+}
+
+// AssertionJWTConsumer atomically records a validated assertion JWT as consumed.
+//
+// Implementations must treat (purpose, issuer, jti) as the replay key, retain it
+// until exp, and return fosite.ErrJTIKnown when that key is already unexpired.
+// Purpose keeps distinct assertion profiles separate, while issuer binds a JTI to
+// its JWT issuer. This intentionally stays separate from Storage so only
+// assertion-grant composition needs replay-consumption access.
+type AssertionJWTConsumer interface {
+	ConsumeAssertionJWT(ctx context.Context, purpose, issuer, jti string, exp time.Time) error
 }
 
 // ClientRegistry provides client registration and lookup operations.

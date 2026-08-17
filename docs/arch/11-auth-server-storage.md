@@ -124,12 +124,16 @@ The in-memory backend uses Go maps protected by `sync.RWMutex` for thread safety
 - State is lost on restart
 - Cannot be shared across replicas
 - Suitable for development and single-instance deployments
+- JWT-bearer assertion replay tracking is per-process; a replay sent to a
+  different process is not detected
 
 **Implementation:** `pkg/authserver/storage/memory.go`
 
 ## Redis Backend
 
 The Redis backend stores all OAuth 2.0 state as JSON-serialized values in Redis.
+JWT-bearer assertion replay tracking uses the same shared Redis namespace, so
+all processes configured with that backend observe a consumed assertion.
 
 ### Connection Architecture
 
